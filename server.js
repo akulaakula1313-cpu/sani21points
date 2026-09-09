@@ -133,7 +133,7 @@ function standBot(r){dealerPlay(r);finishBot(r);}
 function roomView(room,sid){
   return {
     code:room.code,size:room.size,status:room.status,
-    remaining:Math.max(0,15-Math.floor((Date.now()-room.created)/1000)),
+    remaining:Math.max(0,30-Math.floor((Date.now()-room.created)/1000)),
     players:room.players.map(x=>({id:x.id===sid?'me':x.id,name:x.name,stake:x.stake,rematch:x.rematch,phase:x.phase})),
     turn:room.turn,
     turnName:room.turn<room.players.length?room.players[room.turn].name:''
@@ -244,17 +244,17 @@ const server=http.createServer(async(req,res)=>{
         const q=await readBody(req),size=[2,3,4].includes(Number(q.size))?Number(q.size):2,stake=Math.floor(Number(q.stake)||0);
         if(stake<1)return send(res,400,{error:'Введите ставку.'});
         if(stake>p.balance)return send(res,400,{error:'Ставка превышает баланс.'});
-        let code=crypto.randomBytes(3).toString('hex').toUpperCase();while(rooms.has(code))code=crypto.randomBytes(3).toString('hex').toUpperCase();
+        let code=String(Math.floor(1000+Math.random()*9000));while(rooms.has(code))code=String(Math.floor(1000+Math.random()*9000));
         p.balance-=stake;persist();
         const room={code,size,created:Date.now(),lastActive:Date.now(),status:'waiting',players:[{id:sid,name:'Игрок 1',player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false}],deck:[],dealer:[],turn:0};
         rooms.set(code,room);
         return send(res,201,{...roomView(room,sid),balance:p.balance,round:p.round});
       }
-      m=u.match(/^\/api\/rooms\/([A-Z0-9]{6})$/);
+      m=u.match(/^\/api\/rooms\/([0-9]{4})$/);
       if(m){
         const room=rooms.get(m[1]);
         if(!room)return send(res,404,{error:'Комната не найдена.'});
-        if(room.status==='waiting'&&Date.now()-room.created>=15000)startRoom(room);
+        if(room.status==='waiting'&&Date.now()-room.created>=30000)startRoom(room);
         if(req.method==='GET')return send(res,200,{...roomView(room,sid),balance:p.balance,round:p.round,roomState:room.status==='playing'||room.status==='finished'?roomState(room,sid):null});
         if(req.method==='POST'){
           const q=await readBody(req),action=q.action||'join';
