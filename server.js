@@ -6,6 +6,7 @@ const crypto=require('crypto');
 
 const ROOT=__dirname;
 const PORT=Number(process.env.PORT)||3000;
+const ADMIN_PASS=process.env.ADMIN_PASS||'admin123';
 const DATA_FILE=path.join(ROOT,'players.json');
 
 let players={};
@@ -44,9 +45,12 @@ function getPlayer(req,res){
   let sid=(req.headers.cookie||'').match(/(?:^|; )sid=([^;]+)/)?.[1];
   if(!sid||!players[sid]){
     sid=crypto.randomBytes(18).toString('hex');
-    players[sid]={balance:1000,round:0,firstGiftDay:utcDate(),lastGiftDate:null,stats:{win:0,loss:0,push:0}};
+    players[sid]={balance:1000,round:0,firstGiftDay:utcDate(),lastGiftDate:null,stats:{win:0,loss:0,push:0},name:'',blocked:false,role:null,unseenGift:0};
     res.setHeader('Set-Cookie',`sid=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000`);
     persist();
+  }else{
+    const q=players[sid];
+    q.name=q.name||'';q.blocked=!!q.blocked;q.role=q.role||null;q.unseenGift=q.unseenGift||0;
   }
   return [sid,players[sid]];
 }
@@ -102,6 +106,7 @@ function publicBot(r){
 function startBot(p,level,free){
   const b=BOTS[level];
   if(!b)throw Error('Неизвестный бот.');
+  if(!p.name)throw Error('Сначала задайте никнейм.');
   for(const r of rounds.values())if(r.p===p&&r.phase==='player')throw Error('Раунд уже запущен.');
   const stake=free?0:b.stake;
   if(stake>p.balance)throw Error(`Недостаточно фишек. Для ${b.name} нужна ставка ${stake.toLocaleString('ru-RU')} 🪙.`);
@@ -216,9 +221,44 @@ const server=http.createServer(async(req,res)=>{
   let u;
   try{u=decodeURIComponent(req.url.split('?')[0]);}catch{return res.writeHead(400).end('Bad Request');}
   const[sid,p]=getPlayer(req,res);
+  if(p.blocked&&u.startsWith('/api/')&&u!=='/api/me'&&u!=='/api/me/name'&&u!=='/api/me/ack-gift'&&u!=='/api/bot/cancel'&&u!=='/api/admin/login'&&!u.startsWith('/api/admin/'))return send(res,403,{error:'Вы заблокированы администратором.'});
   if(u.startsWith('/api/')){
     try{
-      if(req.method==='GET'&&u==='/api/me')return send(res,200,{balance:p.balance,round:p.round,stats:p.stats,gift:giftInfo(p)});
+      if(req.method==='GET'&&u==='/api/me')return send(res,200,{balance:p.balance,round:p.round,stats:p.stats,name:p.name,blocked:p.blocked,role:p.role==='admin',needName:!p.name,gift:giftInfo(p),unseenGift:p.unseenGift||0});
+      if(req.method==='POST'&&u==='/api/me/ack-gift'){p.unseenGift=0;persist();return send(res,200,{ok:true});}
+      if(req.method==='POST'&&u==='/api/me/name'){
+        const q=await readBody(req);
+        let name=String(q.name||'').trim().replace(/\s+/g,' ');
+        if(name.length<2||name.length>20)return send(res,400,{error:'Никнейм — от 2 до 20 символов.'});
+        if(/[\u0000-\u001f<>]/.test(name))return send(res,400,{error:'Недопустимые символы в никнейме.'});
+        const low=name.toLowerCase();
+        for(const k in players)if(k!==sid&&(players[k].name||'').toLowerCase()===low)return send(res,409,{error:'Этот никнейм уже занят.'});
+        p.name=name;persist();
+        return send(res,200,{name,balance:p.balance});
+      }
+      if(req.method==='POST'&&u==='/api/admin/login'){
+        const q=await readBody(req);
+        if(q.pass===ADMIN_PASS){p.role='admin';persist();return send(res,200,{ok:true});}
+        return send(res,403,{error:'Неверный пароль.'});
+      }
+      if(req.method==='POST'&&u==='/api/admin/logout'){p.role=null;persist();return send(res,200,{ok:true});}
+      if(u.startsWith('/api/admin/')){
+        if(p.role!=='admin')return send(res,403,{error:'Доступ запрещён.'});
+        if(req.method==='GET'&&u==='/api/admin/players')return send(res,200,{players:Object.entries(players).map(([id,x])=>({sid:id,name:x.name||'(без ника)',balance:x.balance,blocked:!!x.blocked,round:x.round,role:x.role||null}))});
+        if(req.method==='POST'){
+          const q=await readBody(req);
+          if(!q.sid||!players[q.sid])return send(res,404,{error:'Игрок не найден.'});
+          if(u==='/api/admin/set-block'){players[q.sid].blocked=!!q.blocked;persist();return send(res,200,{ok:true});}
+          if(u==='/api/admin/gift'){
+            const amount=Math.floor(Number(q.amount)||0);
+            if(amount<1)return send(res,400,{error:'Некорректная сумма.'});
+            players[q.sid].balance+=amount;
+            players[q.sid].unseenGift=(players[q.sid].unseenGift||0)+amount;
+            persist();
+            return send(res,200,{ok:true,name:players[q.sid].name||'(без ника)'});
+          }
+        }
+      }
       if(req.method==='POST'&&u==='/api/daily-gift/claim'){
         const g=giftInfo(p);
         if(p.lastGiftDate===g.serverDate)return send(res,409,{error:'Подарок за сегодня уже получен.',balance:p.balance,gift:g});
@@ -242,11 +282,12 @@ const server=http.createServer(async(req,res)=>{
       }
       if(req.method==='POST'&&u==='/api/rooms'){
         const q=await readBody(req),size=[2,3,4].includes(Number(q.size))?Number(q.size):2,stake=Math.floor(Number(q.stake)||0);
+        if(!p.name)return send(res,400,{error:'Сначала задайте никнейм.'});
         if(stake<1)return send(res,400,{error:'Введите ставку.'});
         if(stake>p.balance)return send(res,400,{error:'Ставка превышает баланс.'});
         let code=String(Math.floor(1000+Math.random()*9000));while(rooms.has(code))code=String(Math.floor(1000+Math.random()*9000));
         p.balance-=stake;persist();
-        const room={code,size,created:Date.now(),lastActive:Date.now(),status:'waiting',players:[{id:sid,name:'Игрок 1',player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false}],deck:[],dealer:[],turn:0};
+        const room={code,size,created:Date.now(),lastActive:Date.now(),status:'waiting',players:[{id:sid,name:p.name,player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false}],deck:[],dealer:[],turn:0};
         rooms.set(code,room);
         return send(res,201,{...roomView(room,sid),balance:p.balance,round:p.round});
       }
@@ -263,11 +304,12 @@ const server=http.createServer(async(req,res)=>{
             if(room.players.some(x=>x.id===sid))return send(res,200,{...roomView(room,sid),balance:p.balance,round:p.round});
             if(room.players.length>=room.size)return send(res,409,{error:'Комната заполнена.'});
             const stake=Math.floor(Number(q.stake)||0);
+            if(!p.name)return send(res,400,{error:'Сначала задайте никнейм.'});
             if(stake<1)return send(res,400,{error:'Введите ставку.'});
             if(stake>p.balance)return send(res,400,{error:'Ставка превышает баланс.'});
             p.balance-=stake;persist();
             room.lastActive=Date.now();
-            room.players.push({id:sid,name:`Игрок ${room.players.length+1}`,player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false});
+            room.players.push({id:sid,name:p.name,player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false});
             if(room.players.length===room.size)startRoom(room);
             return send(res,200,{...roomView(room,sid),balance:p.balance,round:p.round,roomState:room.status==='playing'?roomState(room,sid):null});
           }
