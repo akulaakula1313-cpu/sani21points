@@ -11,7 +11,7 @@ const DATA_FILE=path.join(ROOT,'players.json');
 
 let players={};
 try{players=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'))||{}}catch{players={}}
-if(!players._v){for(const k in players){if(k[0]==='_')continue;players[k].balance=Math.floor((players[k].balance||0)*100);players[k].unseenGift=(players[k].unseenGift||0)*100;}players._v=1;persist();}
+if(players._v!==2){if(players._v){for(const k in players){if(k[0]==='_')continue;players[k].balance=Math.floor((players[k].balance||0)/10);players[k].unseenGift=Math.floor((players[k].unseenGift||0)/10);}}players._v=2;persist();}
 const rooms=new Map();
 const rounds=new Map();
 
@@ -19,11 +19,11 @@ const R=['6','7','8','9','10','J','Q','K','A'];
 const SUITS=[['♠','black'],['♥','red'],['♦','red'],['♣','black']];
 const V={6:6,7:7,8:8,9:9,10:10,J:2,Q:3,K:4,A:11};
 const BOTS={
-  fraer:{name:'Фраер',stake:100000,desc:'Рискованно берёт карты.'},
-  shpilevoy:{name:'Шпилевой',stake:500000,desc:'Стабильная стратегия.'},
-  shuler:{name:'Шулер',stake:1000000,desc:'Максимально осторожная стратегия.'}
+  fraer:{name:'Фраер',stake:10000,desc:'Рискованно берёт карты.'},
+  shpilevoy:{name:'Шпилевой',stake:50000,desc:'Стабильная стратегия.'},
+  shuler:{name:'Шулер',stake:100000,desc:'Максимально осторожная стратегия.'}
 };
-const GIFTS=[0,100000,200000,300000,400000,500000,600000,1000000];
+const GIFTS=[0,10000,20000,30000,40000,50000,60000,100000];
 
 const score=h=>h.reduce((a,c)=>a+(V[c.rank]||0),0);
 const gold=h=>h.length===2&&h.every(c=>c.rank==='A');
@@ -46,7 +46,7 @@ function getPlayer(req,res){
   let sid=(req.headers.cookie||'').match(/(?:^|; )sid=([^;]+)/)?.[1];
   if(!sid||!players[sid]){
     sid=crypto.randomBytes(18).toString('hex');
-    players[sid]={balance:100000,round:0,firstGiftDay:utcDate(),lastGiftDate:null,stats:{win:0,loss:0,push:0},name:'',blocked:false,role:null,unseenGift:0};
+    players[sid]={balance:10000,round:0,firstGiftDay:utcDate(),lastGiftDate:null,stats:{win:0,loss:0,push:0},name:'',blocked:false,role:null,unseenGift:0};
     res.setHeader('Set-Cookie',`sid=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000`);
     persist();
   }else{
@@ -249,6 +249,8 @@ const server=http.createServer(async(req,res)=>{
         if(req.method==='POST'){
           const q=await readBody(req);
           if(!q.sid||!players[q.sid])return send(res,404,{error:'Игрок не найден.'});
+          if(u==='/api/admin/block'){players[q.sid].blocked=true;persist();return send(res,200,{ok:true});}
+          if(u==='/api/admin/unblock'){players[q.sid].blocked=false;persist();return send(res,200,{ok:true});}
           if(u==='/api/admin/set-block'){players[q.sid].blocked=!!q.blocked;persist();return send(res,200,{ok:true});}
           if(u==='/api/admin/gift'){
             const amount=Math.floor(Number(q.amount)||0);
