@@ -1,0 +1,63 @@
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const V = {6:6,7:7,8:8,9:9,10:10,J:2,Q:3,K:4,A:11};
+  const B = {
+    fraer: {name:'Фраер', stake:1000, desc:'Рискованно берёт карты.'},
+    shpilevoy: {name:'Шпилевой', stake:5000, desc:'Стабильная стратегия.'},
+    shuler: {name:'Шулер', stake:10000, desc:'Максимально осторожная стратегия.'}
+  };
+  let mode='bot', bot='fraer', botPlayMode='free', rid=null, roomCode=null, pollTimer=null, lastShownResult=null;
+  let st={balance:0,round:0,bet:0,p:[],d:[],phase:'bet',result:null,h:[]};
+  const score=h=>h.reduce((a,c)=>a+(V[c.rank]||0),0);
+  const gold=h=>h.length===2&&h.every(c=>c.rank==='A');
+  const label=h=>gold(h)?'ЗОЛОТОЕ ОЧКО':score(h);
+  const msg=t=>{if($('msg'))$('msg').textContent=t};
+  async function api(u,o={}){const r=await fetch(u,{credentials:'same-origin',...o,headers:{'Content-Type':'application/json',...(o.headers||{})}});const x=await r.json().catch(()=>({error:'Ошибка сервера'}));if(!r.ok)throw Error(x.error||'Ошибка');return x}
+  function card(c){if(!c||c.hidden)return '<div class="card back"></div>';return `<div class="card ${c.color==='red'?'red':''}"><span class="rank">${c.rank}</span><span class="suit">${c.suit}</span><span class="center">${c.suit}</span></div>`}
+  function render(){
+    const text=(id,v)=>{const e=$(id);if(e)e.textContent=v}; const html=(id,v)=>{const e=$(id);if(e)e.innerHTML=v}; const tog=(id,on)=>{const e=$(id);if(e)e.classList.toggle('hidden',on)};
+    text('balance',st.balance.toLocaleString('ru-RU'));text('bet',st.bet.toLocaleString('ru-RU'));text('round',st.round);
+    text('playerScore',st.p.length?label(st.p):0);text('dealerScore',st.d.length?(st.phase==='player'?'??':label(st.d)):0);
+    html('playerCards',st.p.map(card).join(''));html('dealerCards',st.d.map(card).join(''));
+    text('modeName',mode==='bot'?'БОТ':'ОНЛАЙН');text('opponent',mode==='bot'?B[bot].name:'ИГРОКИ ОНЛАЙН');
+    text('playerStatus',st.phase==='player'?'ВАШ ХОД':st.result?.title||'СДЕЛАЙТЕ СТАВКУ');
+    text('dealerStatus',st.phase==='player'?'СКРЫТАЯ КАРТА':st.phase==='dealer'?'ХОД ДИЛЕРА':st.result?.title||'ОЖИДАНИЕ');
+    tog('play',st.phase!=='player'); const deal=$('deal');if(deal)deal.disabled=st.phase!=='bet';
+    tog('betInputWrap',mode==='bot');tog('chips',mode==='bot');if($('all'))$('all').classList.toggle('hidden',mode==='bot');tog('fixedBet',mode!=='bot');
+    if($('fixedBet')&&mode==='bot')$('fixedBet').textContent=botPlayMode==='free'?'БЕСПЛАТНЫЙ РЕЖИМ':`ФИКСИРОВАННАЯ СТАВКА: ${B[bot].stake.toLocaleString('ru-RU')} 🪙`;
+    if($('stake'))$('stake').disabled=mode==='bot';
+    html('history',st.h.slice().reverse().map(x=>`<div class="hi"><b>Раунд ${x.r}</b><span class="${x.t}">${x.title}</span><br>Ставка ${x.bet.toLocaleString('ru-RU')} • ${x.delta>0?'+':''}${x.delta.toLocaleString('ru-RU')} 🪙</div>`).join(''));
+  }
+  function modal(x){$('modalBody').innerHTML=x;$('modal').classList.remove('hidden')}
+  function close(){ $('modal').classList.add('hidden') }
+  function enter(){close();$('home').classList.add('hidden');$('game').classList.remove('hidden');render()}
+  function startScreen(){st={...st,bet:0,p:[],d:[],phase:'bet',result:null};enter()}
+  function rules(){modal(`<h2>Правила «21»</h2><p>Колода — строго 36 карт: 6–10, J, Q, K, A.</p><p>6=6, 7=7, 8=8, 9=9, 10=10, J=2, Q=3, K=4, A=11.</p><h3>Золотое очко</h3><p>Ровно два туза = 22. Это высшая комбинация и не считается перебором.</p><h3>Игрок</h3><p>«Взять» добавляет карту. 21 завершает ход. Сумма больше 21 сразу проигрывает. «Стоп» передаёт ход.</p><h3>Дилер</h3><p>Берёт только при сумме меньше 17. При 17+ останавливается. Два туза — Золотое очко.</p><h3>Боты</h3><p>Фраер — 1 000 🪙, Шпилевой — 5 000 🪙, Шулер — 10 000 🪙. Для каждого можно выбрать бесплатно или за фиксированную ставку.</p><h3>Онлайн</h3><p>2, 3 или 4 реальных игрока. Ставка свободная. Рекомендации: 1 000 / 5 000 / 10 000 / 50 000 🪙. Ожидание до 15 секунд.</p>`)}
+  function about(){modal(`<h2>SANI GROUP</h2><p>«21 — Очко» — карточная игра SANI GROUP.</p><p>Сервер контролирует баланс, ежедневные подарки, ставки ботов, колоду и результаты онлайн-партий.</p><p>© ${new Date().getFullYear()} SANI GROUP.</p>`)}
+  function giftRender(g){if(!g)return;$('giftText').textContent=g.claimed?`День ${g.day} • ${g.reward.toLocaleString('ru-RU')} 🪙 уже получено. Завтра — ${g.nextReward.toLocaleString('ru-RU')} 🪙.`:`День ${g.day} • сегодня доступно ${g.reward.toLocaleString('ru-RU')} 🪙 • серверная дата ${g.serverDate}.`;$('giftBtn').disabled=g.claimed;$('giftBtn').textContent=g.claimed?'ПОЛУЧЕНО':'ПОЛУЧИТЬ'}
+  async function refresh(){try{const x=await api('/api/me');st.balance=x.balance;st.round=x.round;giftRender(x.gift);render()}catch{msg('Сервер недоступен. Запусти игру через npm start.')}}
+  async function claim(){try{const x=await api('/api/daily-gift/claim',{method:'POST'});st.balance=x.balance;giftRender(x.gift);render();modal(`<div style="text-align:center"><div style="font-size:45px">🎁</div><h2>Подарок получен!</h2><p>+${x.gift.reward.toLocaleString('ru-RU')} 🪙</p><button id="ok" class="gold" style="width:100%">ОТЛИЧНО</button></div>`);$('ok').onclick=close}catch(e){msg(e.message);refresh()}}
+  function botMenu(){
+    modal(`<h2>Игра с компьютером</h2><p>Выберите соперника:</p>${Object.entries(B).map(([k,v])=>`<button class="bot" data-b="${k}"><b>${k==='shuler'?'♛':k==='shpilevoy'?'♞':'♟'}</b><span><strong>${v.name}</strong><small>${v.desc}</small></span><small>${v.stake.toLocaleString('ru-RU')} 🪙</small></button>`).join('')}`);
+    document.querySelectorAll('[data-b]').forEach(el=>el.onclick=()=>{bot=el.dataset.b;modal(`<h2>${B[bot].name}</h2><p>Выберите режим игры:</p><button id="free" class="gold" style="width:100%;margin:6px 0">🆓 БЕСПЛАТНО</button><button id="coins" style="width:100%;margin:6px 0">🪙 ЗА ФИШКИ — ${B[bot].stake.toLocaleString('ru-RU')}</button>`);$('free').onclick=()=>{botPlayMode='free';startScreen();msg('Бесплатная партия. Фишки не используются.')};$('coins').onclick=()=>{botPlayMode='coins';startScreen();msg(`Фиксированная ставка: ${B[bot].stake.toLocaleString('ru-RU')} 🪙.`)}});
+  }
+  function onlineMenu(){
+    modal(`<h2>Игра онлайн</h2><p>Ставка свободная. Рекомендации: <b>1 000 / 5 000 / 10 000 / 50 000</b> 🪙.</p><p>Места:</p><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px"><button data-size="2">1 + 1</button><button data-size="3">1 + 2</button><button data-size="4">1 + 3</button></div><label style="display:block;margin-top:12px">СТАВКА<input id="onlineStake" type="number" min="1" placeholder="Введите сумму"></label><div class="chips" style="margin-top:8px"><button data-online-chip="1000">1 000</button><button data-online-chip="5000">5 000</button><button data-online-chip="10000">10 000</button><button data-online-chip="50000">50 000</button></div><button id="joinRoom" style="width:100%;margin-top:12px">ВОЙТИ ПО КОДУ</button>`);
+    document.querySelectorAll('[data-online-chip]').forEach(el=>el.onclick=()=>{$('onlineStake').value=el.dataset.onlineChip});
+    document.querySelectorAll('[data-size]').forEach(el=>el.onclick=()=>createRoom(Number(el.dataset.size)));
+    $('joinRoom').onclick=joinPrompt;
+  }
+  async function createRoom(size){const stake=Math.floor(Number($('onlineStake')?.value)||0);if(stake<1)return msg('Введите ставку.');try{const x=await api('/api/rooms',{method:'POST',body:JSON.stringify({size,stake})});roomCode=x.code;mode='online';st.phase='waiting';st.bet=stake;enter();msg(`Комната ${x.code}: ${x.players.length}/${x.size}. Ожидаем до 15 секунд.`);pollRoom()}catch(e){msg(e.message)}}
+  function joinPrompt(){modal(`<h2>Войти в комнату</h2><input id="code" class="room" maxlength="6" placeholder="ABC123"><input id="joinStake" type="number" min="1" placeholder="Ставка" style="margin-top:8px;width:100%"><div class="chips" style="margin-top:8px"><button data-jc="1000">1 000</button><button data-jc="5000">5 000</button><button data-jc="10000">10 000</button><button data-jc="50000">50 000</button></div><button id="jn" class="gold" style="width:100%;margin-top:10px">ВОЙТИ</button>`);document.querySelectorAll('[data-jc]').forEach(el=>el.onclick=()=>{$('joinStake').value=el.dataset.jc});$('jn').onclick=async()=>{const c=$('code').value.trim().toUpperCase(),stake=Math.floor(Number($('joinStake').value)||0);try{const x=await api('/api/rooms/'+c,{method:'POST',body:JSON.stringify({action:'join',stake})});roomCode=c;mode='online';st.phase=x.status==='playing'?'player':'waiting';st.bet=stake;enter();msg(x.status==='playing'?'Партия началась.':`Вы подключены: ${x.players.length}/${x.size}.`);pollRoom()}catch(e){msg(e.message)}}}
+  async function pollRoom(){clearTimeout(pollTimer);if(!roomCode)return;try{const x=await api('/api/rooms/'+roomCode);if(x.status==='waiting'){msg(`Комната ${roomCode}: ${x.players.length}/${x.size}. Осталось ${x.remaining} сек.`);pollTimer=setTimeout(pollRoom,700)}else{applyRoom(x);pollTimer=setTimeout(pollRoom,x.status==='finished'?1200:700)}}catch(e){msg(e.message);pollTimer=setTimeout(pollRoom,1500)}}
+  function applyRoom(x){if(!x.roomState){st.phase=x.status==='playing'?'waiting':x.status==='finished'?'finished':'waiting';render();return}const me=x.roomState.players.find(p=>p.id==='me');st.phase=me?.phase||'waiting';st.p=me?.hand||[];st.d=x.roomState.dealer||[];st.bet=me?.stake||0;st.result=me?.result||null;render();if(st.phase==='finished'&&st.result){const key=JSON.stringify(st.result);if(lastShownResult!==key){lastShownResult=key;showResult(st.result,true)}}}
+  async function startBot(){try{const x=await api('/api/bot/start',{method:'POST',body:JSON.stringify({level:bot,free:botPlayMode==='free'})});rid=x.roundId;st={...st,balance:x.balance,round:x.round,bet:x.stake,p:x.player,d:x.dealer,phase:x.phase,result:null};lastShownResult=null;render();msg(botPlayMode==='free'?'Бесплатная партия.':'Ставка зафиксирована сервером.')}catch(e){msg(e.message);refresh()}}
+  function applyBot(x){st.balance=x.balance;st.bet=x.stake;st.p=x.player;st.d=x.dealer;st.phase=x.phase;st.result=x.result;render()}
+  async function hit(){if(mode==='bot'){if(!rid||st.phase!=='player')return;try{const x=await api('/api/bot/'+rid+'/hit',{method:'POST'});applyBot(x);if(x.phase==='finished'){lastShownResult=JSON.stringify(x.result);showResult(x.result,false)}}catch(e){msg(e.message)}}else roomAction('hit')}
+  async function stand(){if(mode==='bot'){if(!rid||st.phase!=='player')return;try{const x=await api('/api/bot/'+rid+'/stand',{method:'POST'});applyBot(x);lastShownResult=JSON.stringify(x.result);showResult(x.result,false)}catch(e){msg(e.message)}}else roomAction('stand')}
+  async function roomAction(action){try{const x=await api('/api/rooms/'+roomCode,{method:'POST',body:JSON.stringify({action})});applyRoom(x)}catch(e){msg(e.message)}}
+  function showResult(r,online){modal(`<div style="text-align:center"><div style="font-size:44px">${r.type==='win'?'🏆':r.type==='push'?'🤝':'♦'}</div><h2>${r.title}</h2><p>Игрок: <b>${r.playerScore}</b> • Дилер: <b>${r.dealerScore}</b></p><p style="color:#e5bb68;font-weight:900">${r.payout?`Выплата: ${r.payout.toLocaleString('ru-RU')} 🪙`:'Бесплатный раунд'}</p><button id="rematch" class="gold" style="width:100%">🔄 РЕВАНШ</button><button id="back" style="width:100%;margin-top:7px">В МЕНЮ</button></div>`);$('back').onclick=()=>{close();$('game').classList.add('hidden');$('home').classList.remove('hidden');rid=null;roomCode=null;clearTimeout(pollTimer);refresh()};$('rematch').onclick=async()=>{if(!online){close();await refresh();startBot()}else{try{const x=await api('/api/rooms/'+roomCode,{method:'POST',body:JSON.stringify({action:'rematch'})});close();if(x.status==='playing'){applyRoom(await api('/api/rooms/'+roomCode))}else msg('Реванш предложен. Ждём остальных игроков.');pollRoom()}catch(e){msg(e.message)}}}}
+  function bind(){document.querySelectorAll('[data-mode]').forEach(el=>el.onclick=()=>el.dataset.mode==='bot'?botMenu():onlineMenu());$('rules').onclick=rules;$('about').onclick=about;$('close').onclick=close;$('giftBtn').onclick=claim;$('deal').onclick=startBot;$('hit').onclick=hit;$('stand').onclick=stand;$('menuBtn').onclick=()=>{$('game').classList.add('hidden');$('home').classList.remove('hidden');clearTimeout(pollTimer);refresh()};document.querySelectorAll('[data-chip]').forEach(el=>el.onclick=()=>{$('stake').value=el.dataset.chip});$('all').onclick=()=>{$('stake').value=st.balance}}
+  bind();refresh();
+})();
