@@ -1,1 +1,46 @@
-'use strict';const assert=require('assert');const R=['6','7','8','9','10','J','Q','K','A'],S=['♠','♥','♦','♣'],V={6:6,7:7,8:8,9:9,10:10,J:2,Q:3,K:4,A:11};function deck(){const d=[];for(const s of S)for(const r of R)d.push({suit:s,rank:r});return d}function score(h){return h.reduce((a,c)=>a+V[c.rank],0)}function gold(h){return h.length===2&&h.every(c=>c.rank==='A')}function bust(h){return !gold(h)&&score(h)>21}assert.equal(deck().length,36);for(const r of R)assert.equal(deck().filter(c=>c.rank===r).length,4);assert(gold([{rank:'A'},{rank:'A'}]));assert(!bust([{rank:'A'},{rank:'A'}]));assert(bust([{rank:'10'},{rank:'9'},{rank:'8'}]));assert.equal(score([{rank:'J'},{rank:'Q'},{rank:'K'}]),9);console.log('ENGINE PASS: 36 cards / values / Golden Point / Bust');
+'use strict';
+const assert=require('assert');
+const {score,gold,bust,resultFor,makeDeck}=require('./server');
+const R=['6','7','8','9','10','J','Q','K','A'];
+const S=['♠','♥','♦','♣'];
+const V={6:6,7:7,8:8,9:9,10:10,J:2,Q:3,K:4,A:11};
+
+const d=makeDeck();
+assert.strictEqual(d.length,36,'Колода должна содержать 36 карт');
+assert.strictEqual(new Set(d.map(c=>c.rank+'|'+c.suit)).size,36,'В колоде не должно быть дублей');
+for(const s of S)for(const r of R)assert.strictEqual(d.filter(c=>c.suit===s&&c.rank===r).length,1);
+assert.strictEqual(score([{rank:'J'},{rank:'Q'},{rank:'K'}]),9);
+assert(gold([{rank:'A'},{rank:'A'}]));
+assert(!bust([{rank:'A'},{rank:'A'}]));
+assert(bust([{rank:'10'},{rank:'9'},{rank:'8'}]));
+
+const w=resultFor([{rank:'A'},{rank:'A'}],[{rank:'10'},{rank:'K'}],1000);
+assert.strictEqual(w.type,'win');
+const push=resultFor([{rank:'A'},{rank:'A'}],[{rank:'A'},{rank:'A'}],1000);
+assert.strictEqual(push.type,'push');
+const pb=resultFor([{rank:'10'},{rank:'9'},{rank:'8'}],[{rank:'10'}],1000);
+assert.strictEqual(pb.type,'loss');
+const db=resultFor([{rank:'10'}],[{rank:'10'},{rank:'9'},{rank:'8'}],1000);
+assert.strictEqual(db.type,'win');
+const tie=resultFor([{rank:'10'},{rank:'7'}],[{rank:'9'},{rank:'8'}],5000);
+assert.strictEqual(tie.type,'push');
+assert.strictEqual(tie.payout,5000);
+
+const goldVs21=resultFor([{rank:'A'},{rank:'A'}],[{rank:'A'},{rank:'10'}],1000);
+assert.strictEqual(goldVs21.type,'win','Золотое очко должно бить обычные 21');
+const twentyOneVsGold=resultFor([{rank:'A'},{rank:'10'}],[{rank:'A'},{rank:'A'}],1000);
+assert.strictEqual(twentyOneVsGold.type,'loss','Обычные 21 должны проигрывать Золотому очку');
+assert.strictEqual(goldVs21.payout,2000);
+const tripleAceBust=resultFor([{rank:'A'},{rank:'A'},{rank:'9'}],[{rank:'K'}],1000);
+assert.strictEqual(tripleAceBust.type,'loss','Три туза — не Золотое очко, это перебор');
+assert.strictEqual(tripleAceBust.payout,0);
+const bothBust=resultFor([{rank:'10'},{rank:'9'},{rank:'8'}],[{rank:'10'},{rank:'K'},{rank:'6'}],2000);
+assert.strictEqual(bothBust.type,'loss');
+assert.strictEqual(bothBust.payout,0);
+const dealerBeats=resultFor([{rank:'K'},{rank:'7'}],[{rank:'K'},{rank:'8'}],1000);
+assert.strictEqual(dealerBeats.type,'loss');
+assert.strictEqual(dealerBeats.payout,0);
+const standWin=resultFor([{rank:'K'},{rank:'8'}],[{rank:'K'},{rank:'7'}],300);
+assert.strictEqual(standWin.type,'win');
+assert.strictEqual(standWin.payout,600);
+console.log('ENGINE PASS: 36 cards / unique deck / values / Golden Point / Bust / result matrix');

@@ -1,0 +1,4 @@
+node_modules/
+players.json
+*.log
+.DS_Store
