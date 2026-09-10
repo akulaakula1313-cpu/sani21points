@@ -3,15 +3,88 @@ const http=require('http');
 const fs=require('fs');
 const path=require('path');
 const crypto=require('crypto');
+const {MongoClient}=require('mongodb');
 
 const ROOT=__dirname;
 const PORT=Number(process.env.PORT)||3000;
 const ADMIN_PASS=process.env.ADMIN_PASS||'admin123';
 const DATA_FILE=path.join(ROOT,'players.json');
 
+// === MongoDB ===
+const MONGO_URI=process.env.MONGO_URI||'';
+const MONGO_DB=process.env.MONGO_DB||'sani21';
+let mongoClient=null;
+let playersCol=null;
+let useMongo=false;
+
+// === Кэш игроков в памяти ===
 let players={};
-try{players=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'))||{}}catch{players={}}
-if(players._v!==2){if(players._v){for(const k in players){if(k[0]==='_')continue;players[k].balance=Math.floor((players[k].balance||0)/10);players[k].unseenGift=Math.floor((players[k].unseenGift||0)/10);}}players._v=2;persist();}
+
+// Очередь "грязных" игроков для записи в Mongo (debounce)
+const dirty=new Set();
+let flushTimer=null;
+let flushing=false;
+
+function persistFile(){
+  try{fs.writeFileSync(DATA_FILE,JSON.stringify(players,null,2));}catch(e){console.error('file persist error:',e.message);}
+}
+
+function persist(sid){
+  if(!useMongo){persistFile();return;}
+  if(sid)dirty.add(sid);
+  else for(const k in players){if(k[0]==='_')continue;dirty.add(k);}
+  if(flushTimer)return;
+  flushTimer=setTimeout(flushToMongo,500);
+}
+
+async function flushToMongo(){
+  flushTimer=null;
+  if(!useMongo||!playersCol||flushing)return;
+  if(!dirty.size)return;
+  const ids=[...dirty];dirty.clear();
+  const ops=[];
+  for(const id of ids){
+    const p=players[id];
+    if(!p){ // удалён — удаляем документ
+      ops.push({deleteOne:{filter:{_id:id}}});
+      continue;
+    }
+    // Копируем только сериализуемые поля (без ссылок на player/room)
+    ops.push({replaceOne:{
+      filter:{_id:id},
+      replacement:{_id:id,...p},
+      upsert:true
+    }});
+  }
+  if(!ops.length)return;
+  flushing=true;
+  try{await playersCol.bulkWrite(ops,{ordered:false});}
+  catch(e){console.error('mongo write error:',e.message);}
+  finally{flushing=false;}
+  if(dirty.size&&!flushTimer)flushTimer=setTimeout(flushToMongo,500);
+}
+
+async function loadPlayers(){
+  if(!MONGO_URI){
+    console.warn('MONGO_URI не задан — работаю с players.json (fallback).');
+    try{players=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'))||{};}catch{players={};}
+    return;
+  }
+  mongoClient=new MongoClient(MONGO_URI);
+  await mongoClient.connect();
+  playersCol=mongoClient.db(MONGO_DB).collection('players');
+  await playersCol.createIndex({_id:1});
+  const docs=await playersCol.find({}).toArray();
+  players={};
+  for(const d of docs){
+    const {_id,...rest}=d;
+    players[_id]=rest;
+  }
+  useMongo=true;
+  console.log(`MongoDB подключена: загружено ${Object.keys(players).length} игроков`);
+}
+
+// === Игровая логика ===
 const rooms=new Map();
 const rounds=new Map();
 
@@ -29,7 +102,6 @@ const score=h=>h.reduce((a,c)=>a+(V[c.rank]||0),0);
 const gold=h=>h.length===2&&h.every(c=>c.rank==='A');
 const bust=h=>!gold(h)&&score(h)>21;
 
-function persist(){fs.writeFileSync(DATA_FILE,JSON.stringify(players,null,2));}
 function utcDate(){return new Date().toISOString().slice(0,10);}
 function giftDay(p){
   const today=utcDate();
@@ -48,7 +120,7 @@ function getPlayer(req,res){
     sid=crypto.randomBytes(18).toString('hex');
     players[sid]={balance:10000,round:0,firstGiftDay:utcDate(),lastGiftDate:null,stats:{win:0,loss:0,push:0},name:'',blocked:false,role:null,unseenGift:0};
     res.setHeader('Set-Cookie',`sid=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000`);
-    persist();
+    persist(sid);
   }else{
     const q=players[sid];
     q.name=q.name||'';q.blocked=!!q.blocked;q.role=q.role||null;q.unseenGift=q.unseenGift||0;
@@ -117,7 +189,7 @@ function startBot(p,level,free){
   r.player.push(draw(r));
   r.dealer.push(draw(r));
   rounds.set(r.id,r);
-  persist();
+  persist(r.p&&Object.keys(players).find(k=>players[k]===p));
   return r;
 }
 function finishBot(r){
@@ -146,7 +218,6 @@ function roomView(room,sid){
   };
 }
 function roomState(room,sid){
-  // The dealer's first card is always visible. Any additional cards are hidden until the dealer's turn/result.
   const dealer=room.status==='finished'?room.dealer:room.dealer.map((c,i)=>i===0?c:{hidden:true});
   return {
     dealer,
@@ -162,6 +233,7 @@ function startRoom(room){
   room.turn=0;
   room.lastActive=Date.now();
   for(const pl of room.players){
+    if(pl.left)continue;
     pl.player.round++;
     pl.hand=[draw(room)];
     pl.phase='player';pl.result=null;pl.rematch=false;
@@ -172,6 +244,7 @@ function finishRoom(room){
   if(room.status!=='playing'||room.players.some(x=>x.phase==='player'))return;
   dealerPlay(room);
   for(const pl of room.players){
+    if(pl.left)continue;
     pl.result=resultFor(pl.hand,room.dealer,pl.stake);
     pl.phase='finished';
     settle(pl.player,pl.result);
@@ -193,7 +266,6 @@ function actionRoom(room,sid,action){
     pl.phase='finished';
   }else throw Error('Неизвестное действие.');
   while(room.turn<room.players.length&&room.players[room.turn].phase==='finished')room.turn++;
-  // A player's bust ends that player's participation immediately. Other online players may still play.
   room.lastActive=Date.now();
   finishRoom(room);
   persist();
@@ -210,7 +282,7 @@ function cleanup(){
       finishRoom(r);
     }
     if(now-r.created>3600000){
-      if(r.status==='waiting')for(const pl of r.players)if(pl.staked){pl.player.balance+=pl.stake;pl.staked=false;}
+      if(r.status==='waiting')for(const pl of r.players)if(pl.staked&&!pl.left){pl.player.balance+=pl.stake;pl.staked=false;}
       rooms.delete(k);persist();
     }
   }
@@ -226,7 +298,7 @@ const server=http.createServer(async(req,res)=>{
   if(u.startsWith('/api/')){
     try{
       if(req.method==='GET'&&u==='/api/me')return send(res,200,{balance:p.balance,round:p.round,stats:p.stats,name:p.name,blocked:p.blocked,role:p.role==='admin',needName:!p.name,gift:giftInfo(p),unseenGift:p.unseenGift||0});
-      if(req.method==='POST'&&u==='/api/me/ack-gift'){p.unseenGift=0;persist();return send(res,200,{ok:true});}
+      if(req.method==='POST'&&u==='/api/me/ack-gift'){p.unseenGift=0;persist(sid);return send(res,200,{ok:true});}
       if(req.method==='POST'&&u==='/api/me/name'){
         const q=await readBody(req);
         let name=String(q.name||'').trim().replace(/\s+/g,' ');
@@ -234,30 +306,30 @@ const server=http.createServer(async(req,res)=>{
         if(/[\u0000-\u001f<>]/.test(name))return send(res,400,{error:'Недопустимые символы в никнейме.'});
         const low=name.toLowerCase();
         for(const k in players){if(k[0]==='_')continue;if(k!==sid&&(players[k].name||'').toLowerCase()===low)return send(res,409,{error:'Этот никнейм уже занят.'});}
-        p.name=name;persist();
+        p.name=name;persist(sid);
         return send(res,200,{name,balance:p.balance});
       }
       if(req.method==='POST'&&u==='/api/admin/login'){
         const q=await readBody(req);
-        if(q.pass===ADMIN_PASS){p.role='admin';persist();return send(res,200,{ok:true});}
+        if(q.pass===ADMIN_PASS){p.role='admin';persist(sid);return send(res,200,{ok:true});}
         return send(res,403,{error:'Неверный пароль.'});
       }
-      if(req.method==='POST'&&u==='/api/admin/logout'){p.role=null;persist();return send(res,200,{ok:true});}
+      if(req.method==='POST'&&u==='/api/admin/logout'){p.role=null;persist(sid);return send(res,200,{ok:true});}
       if(u.startsWith('/api/admin/')){
         if(p.role!=='admin')return send(res,403,{error:'Доступ запрещён.'});
         if(req.method==='GET'&&u==='/api/admin/players')return send(res,200,{players:Object.entries(players).filter(([k])=>k[0]!=='_').map(([id,x])=>({sid:id,name:x.name||'(без ника)',balance:x.balance,blocked:!!x.blocked,round:x.round,role:x.role||null}))});
         if(req.method==='POST'){
           const q=await readBody(req);
           if(!q.sid||!players[q.sid])return send(res,404,{error:'Игрок не найден.'});
-          if(u==='/api/admin/block'){players[q.sid].blocked=true;persist();return send(res,200,{ok:true});}
-          if(u==='/api/admin/unblock'){players[q.sid].blocked=false;persist();return send(res,200,{ok:true});}
-          if(u==='/api/admin/set-block'){players[q.sid].blocked=!!q.blocked;persist();return send(res,200,{ok:true});}
+          if(u==='/api/admin/block'){players[q.sid].blocked=true;persist(q.sid);return send(res,200,{ok:true});}
+          if(u==='/api/admin/unblock'){players[q.sid].blocked=false;persist(q.sid);return send(res,200,{ok:true});}
+          if(u==='/api/admin/set-block'){players[q.sid].blocked=!!q.blocked;persist(q.sid);return send(res,200,{ok:true});}
           if(u==='/api/admin/gift'){
             const amount=Math.floor(Number(q.amount)||0);
             if(amount<1)return send(res,400,{error:'Некорректная сумма.'});
             players[q.sid].balance+=amount;
             players[q.sid].unseenGift=(players[q.sid].unseenGift||0)+amount;
-            persist();
+            persist(q.sid);
             return send(res,200,{ok:true,name:players[q.sid].name||'(без ника)'});
           }
         }
@@ -265,14 +337,14 @@ const server=http.createServer(async(req,res)=>{
       if(req.method==='POST'&&u==='/api/daily-gift/claim'){
         const g=giftInfo(p);
         if(p.lastGiftDate===g.serverDate)return send(res,409,{error:'Подарок за сегодня уже получен.',balance:p.balance,gift:g});
-        p.balance+=g.reward;p.lastGiftDate=g.serverDate;persist();
+        p.balance+=g.reward;p.lastGiftDate=g.serverDate;persist(sid);
         return send(res,200,{balance:p.balance,gift:giftInfo(p)});
       }
       if(req.method==='POST'&&u==='/api/bot/start'){
         const q=await readBody(req);const r=startBot(p,q.level,Boolean(q.free));return send(res,200,publicBot(r));
       }
       if(req.method==='POST'&&u==='/api/bot/cancel'){
-        for(const r of rounds.values())if(r.p===p&&r.phase==='player'){p.balance+=r.stake;rounds.delete(r.id);persist();return send(res,200,{balance:p.balance});}
+        for(const r of rounds.values())if(r.p===p&&r.phase==='player'){p.balance+=r.stake;rounds.delete(r.id);persist(sid);return send(res,200,{balance:p.balance});}
         return send(res,200,{balance:p.balance});
       }
       let m=u.match(/^\/api\/bot\/([a-f0-9]{20})\/(hit|stand)$/);
@@ -289,8 +361,8 @@ const server=http.createServer(async(req,res)=>{
         if(stake<1)return send(res,400,{error:'Введите ставку.'});
         if(stake>p.balance)return send(res,400,{error:'Ставка превышает баланс.'});
         let code=String(Math.floor(1000+Math.random()*9000));while(rooms.has(code))code=String(Math.floor(1000+Math.random()*9000));
-        p.balance-=stake;persist();
-        const room={code,size,created:Date.now(),lastActive:Date.now(),status:'waiting',players:[{id:sid,name:p.name,player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false}],deck:[],dealer:[],turn:0};
+        p.balance-=stake;persist(sid);
+        const room={code,size,created:Date.now(),lastActive:Date.now(),status:'waiting',players:[{id:sid,name:p.name,player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false,left:false}],deck:[],dealer:[],turn:0};
         rooms.set(code,room);
         return send(res,201,{...roomView(room,sid),balance:p.balance,round:p.round});
       }
@@ -310,21 +382,42 @@ const server=http.createServer(async(req,res)=>{
             if(!p.name)return send(res,400,{error:'Сначала задайте никнейм.'});
             if(stake<1)return send(res,400,{error:'Введите ставку.'});
             if(stake>p.balance)return send(res,400,{error:'Ставка превышает баланс.'});
-            p.balance-=stake;persist();
+            p.balance-=stake;persist(sid);
             room.lastActive=Date.now();
-            room.players.push({id:sid,name:p.name,player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false});
+            room.players.push({id:sid,name:p.name,player:p,stake,staked:true,hand:[],phase:'waiting',result:null,rematch:false,left:false});
             if(room.players.length===room.size)startRoom(room);
             return send(res,200,{...roomView(room,sid),balance:p.balance,round:p.round,roomState:room.status==='playing'?roomState(room,sid):null});
           }
+          if(action==='leave'){
+            const pl=room.players.find(x=>x.id===sid);if(!pl)return send(res,404,{error:'Игрок не в комнате.'});
+            if(room.status==='waiting'){
+              pl.player.balance+=pl.stake;pl.staked=false;persist(sid);
+              room.players=room.players.filter(x=>x.id!==sid);
+              if(!room.players.length)rooms.delete(room.code);
+              return send(res,200,{leftLost:0,balance:pl.player.balance,...roomView(room,sid)});
+            }
+            if(room.status==='playing'){
+              pl.phase='finished';pl.left=true;pl.staked=false;
+              pl.result={type:'loss',title:'ИГРОК ВЫШЕЛ ИЗ ИГРЫ',delta:-pl.stake,payout:0};
+              while(room.turn<room.players.length&&room.players[room.turn].phase==='finished')room.turn++;
+              room.lastActive=Date.now();
+              finishRoom(room);persist(sid);
+              return send(res,200,{leftLost:pl.stake,balance:p.balance,...roomView(room,sid),roomState:roomState(room,sid)});
+            }
+            return send(res,200,{leftLost:0,balance:p.balance,...roomView(room,sid)});
+          }
           if(action==='rematch'){
             if(room.status!=='finished')return send(res,409,{error:'Реванш пока недоступен.'});
+            const active=room.players.filter(x=>!x.left);
+            if(!active.length){rooms.delete(room.code);return send(res,200,{ok:true,balance:p.balance});}
             const pl=room.players.find(x=>x.id===sid);if(!pl)return send(res,404,{error:'Игрок не в комнате.'});
             pl.rematch=true;
-            if(room.players.every(x=>x.rematch)){
-              const short=room.players.find(x=>x.stake>x.player.balance);
-              if(short){for(const x of room.players)x.rematch=false;return send(res,409,{error:`${short.name} не хватает фишек для реванша.`});}
-              for(const x of room.players){x.player.balance-=x.stake;x.staked=true;x.hand=[];x.phase='player';x.result=null;x.rematch=false;x.player.round++;}
-              room.lastActive=Date.now();room.status='playing';room.deck=makeDeck();room.dealer=[draw(room)];room.turn=0;for(const x of room.players)x.hand=[draw(room)];persist();
+            if(active.every(x=>x.rematch)){
+              const short=active.find(x=>x.stake>x.player.balance);
+              if(short){for(const x of active)x.rematch=false;return send(res,409,{error:`${short.name} не хватает фишек для реванша.`});}
+              for(const x of active){x.player.balance-=x.stake;x.staked=true;x.hand=[];x.phase='player';x.result=null;x.rematch=false;x.player.round++;}
+              for(const x of room.players.filter(x=>x.left)){x.rematch=false;}
+              room.lastActive=Date.now();room.status='playing';room.deck=makeDeck();room.dealer=[draw(room)];room.turn=0;for(const x of active)x.hand=[draw(room)];persist();
             }
             return send(res,200,{...roomView(room,sid),balance:p.balance,round:p.round,roomState:room.status==='playing'?roomState(room,sid):null});
           }
@@ -350,5 +443,38 @@ const server=http.createServer(async(req,res)=>{
   });
 });
 
-if(require.main===module)server.listen(PORT,()=>console.log(`SANI GROUP 21 server on ${PORT}`));
+async function main(){
+  try{await loadPlayers();}
+  catch(e){console.error('Ошибка подключения к MongoDB:',e.message);console.warn('Падаю на players.json (fallback).');try{players=JSON.parse(fs.readFileSync(DATA_FILE,'utf8'))||{};}catch{players={};}}
+
+  // Миграция версии (только для старых игроков)
+  if(players._v!==2){
+    if(players._v){
+      for(const k in players){
+        if(k[0]==='_')continue;
+        players[k].balance=Math.floor((players[k].balance||0)/10);
+        players[k].unseenGift=Math.floor((players[k].unseenGift||0)/10);
+      }
+    }
+    players._v=2;
+    persist();
+  }
+
+  server.listen(PORT,()=>console.log(`SANI GROUP 21 server on ${PORT}${useMongo?' (MongoDB)':' (file)'}`));
+}
+
+if(require.main===module){
+  main().catch(e=>{console.error(e);process.exit(1);});
+}
+
+// Аккуратно сохраняем и закрываем соединение при остановке
+async function shutdown(sig){
+  console.log(`\n${sig} получен, сохраняю данные...`);
+  try{await flushToMongo();}catch(e){console.error(e.message);}
+  try{await mongoClient?.close();}catch{}
+  process.exit(0);
+}
+process.on('SIGINT',()=>shutdown('SIGINT'));
+process.on('SIGTERM',()=>shutdown('SIGTERM'));
+
 module.exports={server,score,gold,bust,resultFor,makeDeck,dealerPlay,BOTS,GIFTS};
