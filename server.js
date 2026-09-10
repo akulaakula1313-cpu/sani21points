@@ -317,7 +317,13 @@ const server=http.createServer(async(req,res)=>{
       if(req.method==='POST'&&u==='/api/admin/logout'){p.role=null;persist(sid);return send(res,200,{ok:true});}
       if(u.startsWith('/api/admin/')){
         if(p.role!=='admin')return send(res,403,{error:'Доступ запрещён.'});
-        if(req.method==='GET'&&u==='/api/admin/players')return send(res,200,{players:Object.entries(players).filter(([k])=>k[0]!=='_').map(([id,x])=>({sid:id,name:x.name||'(без ника)',balance:x.balance,blocked:!!x.blocked,round:x.round,role:x.role||null}))});
+if(req.method==='GET'&&u==='/api/admin/players')
+  return send(res,200,{players:
+    Object.entries(players)
+      .filter(([k])=>k[0]!=='_')
+      .filter(([,x])=>x.name && x.name.trim() && (x.round||0)>0)   // ← только реальные игроки
+      .map(([id,x])=>({sid:id,name:x.name,balance:x.balance,blocked:!!x.blocked,round:x.round,role:x.role||null}))
+  });
         if(req.method==='POST'){
           const q=await readBody(req);
           if(!q.sid||!players[q.sid])return send(res,404,{error:'Игрок не найден.'});
