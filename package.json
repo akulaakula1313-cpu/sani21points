@@ -1,1 +1,16 @@
-{"name":"sani-group-21","version":"3.0.0","private":true,"type":"commonjs","scripts":{"start":"node server.js","test":"node test_engine.js"},"engines":{"node":">=18"}}
+{
+  "name": "sani-group-21",
+  "version": "3.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test_engine.js"
+  },
+  "dependencies": {
+    "mongodb": "^6.10.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
