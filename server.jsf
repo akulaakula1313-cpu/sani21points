@@ -321,6 +321,12 @@ if(req.method==='GET'&&u==='/api/admin/players')
   return send(res,200,{players:
     Object.entries(players)
       .filter(([k])=>k[0]!=='_')
+      .filter(([,x])=>x.name && x.name.trim())   // ← только с ником
+      .map(([id,x])=>({sid:id,name:x.name,balance:x.balance,blocked:!!x.blocked,round:x.round,role:x.role||null}))
+  });
+        return send(res,200,{players:
+    Object.entries(players)
+      .filter(([k])=>k[0]!=='_')
       .filter(([,x])=>x.name && x.name.trim() && (x.round||0)>0)   // ← только реальные игроки
       .map(([id,x])=>({sid:id,name:x.name,balance:x.balance,blocked:!!x.blocked,round:x.round,role:x.role||null}))
   });
